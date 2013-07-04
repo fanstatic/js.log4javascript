@@ -1,5 +1,5 @@
 /**
- * Copyright 2009 Tim Down.
+ * Copyright 2013 Tim Down.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,9 +24,9 @@
  * stored in the same directory as the main log4javascript.js file.
  *
  * Author: Tim Down <tim@log4javascript.org>
- * Version: 1.4.2
+ * Version: 1.4.6
  * Edition: log4javascript
- * Build date: 14 October 2011
+ * Build date: 19 March 2013
  * Website: http://log4javascript.org
  */
 
@@ -151,7 +151,7 @@ var log4javascript = (function() {
 	Log4JavaScript.prototype = new EventSupport();
 
 	log4javascript = new Log4JavaScript();
-	log4javascript.version = "1.4.2";
+	log4javascript.version = "1.4.6";
 	log4javascript.edition = "log4javascript";
 
 	/* -------------------------------------------------------------------------- */
@@ -682,7 +682,7 @@ var log4javascript = (function() {
 			}
 		};
 
-		this.groupEnd = function(name) {
+		this.groupEnd = function() {
 			if (enabled) {
 				var effectiveAppenders = this.getEffectiveAppenders();
 				for (var i = 0, len = effectiveAppenders.length; i < len; i++) {
@@ -1387,6 +1387,8 @@ var log4javascript = (function() {
 				}
 				expansion += childLines.join("," + newLine) + newLine + indentation + "]";
 				return expansion;
+            } else if (Object.prototype.toString.call(obj) == "[object Date]") {
+                return obj.toString();
 			} else if (typeof obj == "object" && depth > 0) {
 				objectsExpanded.push(obj);
 				expansion = "{" + newLine;
@@ -1801,7 +1803,11 @@ var log4javascript = (function() {
 									fieldIndex = fieldIndex - 1;
 								}
 							}
-							replacement = this.customFields[fieldIndex].value;
+                            var val = this.customFields[fieldIndex].value;
+                            if (typeof val == "function") {
+                                val = val(this, loggingEvent);
+                            }
+                            replacement = val;
 						}
 						break;
 					case "n": // New line
@@ -1948,36 +1954,37 @@ var log4javascript = (function() {
 	/* ---------------------------------------------------------------------- */
 	// AjaxAppender related
 
-    var xmlHttpFactories = [
-        function() { return new XMLHttpRequest(); },
-        function() { return new ActiveXObject("Msxml2.XMLHTTP"); },
-        function() { return new ActiveXObject("Microsoft.XMLHTTP"); }
-    ];
+	var xmlHttpFactories = [
+		function() { return new XMLHttpRequest(); },
+		function() { return new ActiveXObject("Msxml2.XMLHTTP"); },
+		function() { return new ActiveXObject("Microsoft.XMLHTTP"); }
+	];
 
-    var getXmlHttp = function(errorHandler) {
-        // This is only run the first time; the value of getXmlHttp gets
-        // replaced with the factory that succeeds on the first run
-        var xmlHttp = null, factory;
-        for (var i = 0, len = xmlHttpFactories.length; i < len; i++) {
-            factory = xmlHttpFactories[i];
-            try {
-                xmlHttp = factory();
-                getXmlHttp = factory;
-                return xmlHttp;
-            } catch (e) {
-            }
-        }
-        // If we're here, all factories have failed, so throw an error
-        if (errorHandler) {
-            errorHandler();
-        } else {
-            handleError("getXmlHttp: unable to obtain XMLHttpRequest object");
-        }
-    };
+	var getXmlHttp = function(errorHandler) {
+		// This is only run the first time; the value of getXmlHttp gets
+		// replaced with the factory that succeeds on the first run
+		var xmlHttp = null, factory;
+		for (var i = 0, len = xmlHttpFactories.length; i < len; i++) {
+			factory = xmlHttpFactories[i];
+			try {
+				xmlHttp = factory();
+				getXmlHttp = factory;
+				return xmlHttp;
+			} catch (e) {
+			}
+		}
+		// If we're here, all factories have failed, so throw an error
+		if (errorHandler) {
+			errorHandler();
+		} else {
+			handleError("getXmlHttp: unable to obtain XMLHttpRequest object");
+		}
+	};
 
 	function isHttpRequestSuccessful(xmlHttp) {
-		return (isUndefined(xmlHttp.status) || xmlHttp.status === 0 ||
-			(xmlHttp.status >= 200 && xmlHttp.status < 300));
+		return isUndefined(xmlHttp.status) || xmlHttp.status === 0 ||
+			(xmlHttp.status >= 200 && xmlHttp.status < 300) ||
+			xmlHttp.status == 1223 /* Fix for IE */;
 	}
 
 	/* ---------------------------------------------------------------------- */
@@ -1999,10 +2006,12 @@ var log4javascript = (function() {
 		var failCallback = this.defaults.failCallback;
 		var postVarName = this.defaults.postVarName;
 		var sendAllOnUnload = this.defaults.sendAllOnUnload;
+		var contentType = this.defaults.contentType;
 		var sessionId = null;
 
 		var queuedLoggingEvents = [];
 		var queuedRequests = [];
+		var headers = [];
 		var sending = false;
 		var initialized = false;
 
@@ -2065,7 +2074,7 @@ var log4javascript = (function() {
 		this.isSendAllOnUnload = function() { return sendAllOnUnload; };
 		this.setSendAllOnUnload = function(sendAllOnUnloadParam) {
 			if (checkCanConfigure("sendAllOnUnload")) {
-				sendAllOnUnload = extractIntFromParam(sendAllOnUnloadParam, sendAllOnUnload);
+				sendAllOnUnload = extractBooleanFromParam(sendAllOnUnloadParam, sendAllOnUnload);
 			}
 		};
 
@@ -2081,6 +2090,15 @@ var log4javascript = (function() {
 		this.setPostVarName = function(postVarNameParam) {
 			if (checkCanConfigure("postVarName")) {
 				postVarName = extractStringFromParam(postVarNameParam, postVarName);
+			}
+		};
+
+		this.getHeaders = function() { return headers; };
+		this.addHeader = function(name, value) {
+			if (name.toLowerCase() == "content-type") {
+				contentType = value;
+			} else {
+				headers.push( { name: name, value: value } );
 			}
 		};
 
@@ -2120,11 +2138,11 @@ var log4javascript = (function() {
 		// waiting for responses or timers or incomplete batches - everything
 		// must go, now
 		function sendAllRemaining() {
+			var sendingAnything = false;
 			if (isSupported && enabled) {
 				// Create requests for everything left over, batched as normal
 				var actualBatchSize = appender.getLayout().allowBatching() ? batchSize : 1;
 				var currentLoggingEvent;
-				var postData = "";
 				var batchedLoggingEvents = [];
 				while ((currentLoggingEvent = queuedLoggingEvents.shift())) {
 					batchedLoggingEvents.push(currentLoggingEvent);
@@ -2138,11 +2156,15 @@ var log4javascript = (function() {
 				if (batchedLoggingEvents.length > 0) {
 					queuedRequests.push(batchedLoggingEvents);
 				}
+				sendingAnything = (queuedRequests.length > 0);
 				waitForResponse = false;
 				timed = false;
 				sendAll();
 			}
+			return sendingAnything;
 		}
+
+		this.sendAllRemaining = sendAllRemaining;
 
 		function preparePostData(batchedLoggingEvents) {
 			// Format the logging events
@@ -2152,7 +2174,7 @@ var log4javascript = (function() {
 			while ((currentLoggingEvent = batchedLoggingEvents.shift())) {
 				var currentFormattedMessage = appender.getLayout().format(currentLoggingEvent);
 				if (appender.getLayout().ignoresThrowable()) {
-					currentFormattedMessage += loggingEvent.getThrowableStrRep();
+					currentFormattedMessage += currentLoggingEvent.getThrowableStrRep();
 				}
 				formattedMessages.push(currentFormattedMessage);
 			}
@@ -2164,13 +2186,16 @@ var log4javascript = (function() {
 					formattedMessages.join(appender.getLayout().batchSeparator) +
 					appender.getLayout().batchFooter;
 			}
-			postData = appender.getLayout().returnsPostData ? postData :
-				urlEncode(postVarName) + "=" + urlEncode(postData);
-			// Add the layout name to the post data
-			if (postData.length > 0) {
-				postData += "&";
+			if (contentType == appender.defaults.contentType) {
+				postData = appender.getLayout().returnsPostData ? postData :
+					urlEncode(postVarName) + "=" + urlEncode(postData);
+				// Add the layout name to the post data
+				if (postData.length > 0) {
+					postData += "&";
+				}
+				postData += "layout=" + urlEncode(appender.getLayout().toString());
 			}
-			return postData + "layout=" + urlEncode(appender.getLayout().toString());
+			return postData;
 		}
 
 		function scheduleSending() {
@@ -2216,7 +2241,10 @@ var log4javascript = (function() {
 					};
 					xmlHttp.open("POST", url, true);
 					try {
-						xmlHttp.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+						for (var i = 0, header; header = headers[i++]; ) {
+							xmlHttp.setRequestHeader(header.name, header.value);
+						}
+						xmlHttp.setRequestHeader("Content-Type", contentType);
 					} catch (headerEx) {
 						var msg = "AjaxAppender.append: your browser's XMLHttpRequest implementation" +
 							" does not support setRequestHeader, therefore cannot post data. AjaxAppender disabled";
@@ -2259,7 +2287,7 @@ var log4javascript = (function() {
 					// If using a timer, the queue of requests will be processed by the
 					// timer function, so nothing needs to be done here.
 					if (!timed && (!waitForResponse || (waitForResponse && !sending))) {
-                        sendAll();
+						sendAll();
 					}
 				}
 			}
@@ -2269,7 +2297,15 @@ var log4javascript = (function() {
 			initialized = true;
 			// Add unload event to send outstanding messages
 			if (sendAllOnUnload) {
-				addEvent(window, "unload", sendAllRemaining);
+				var oldBeforeUnload = window.onbeforeunload;
+				window.onbeforeunload = function() {
+					if (oldBeforeUnload) {
+						oldBeforeUnload();
+					}
+					if (sendAllRemaining()) {
+						return "Sending log messages";
+					}
+				};
 			}
 			// Start timer
 			if (timed) {
@@ -2285,10 +2321,11 @@ var log4javascript = (function() {
 		timed: false,
 		timerInterval: 1000,
 		batchSize: 1,
-		sendAllOnUnload: true,
+		sendAllOnUnload: false,
 		requestSuccessCallback: null,
 		failCallback: null,
-		postVarName: "data"
+		postVarName: "data",
+		contentType: "application/x-www-form-urlencoded"
 	};
 
 	AjaxAppender.prototype.layout = new HttpPostDataLayout();
@@ -5327,7 +5364,16 @@ var log4javascript = (function() {
 				// Create open, init, getConsoleWindow and safeToAppend functions
 				open = function() {
 					var windowProperties = "width=" + width + ",height=" + height + ",status,resizable";
-					var windowName = "PopUp_" + location.host.replace(/[^a-z0-9]/gi, "_") + "_" + consoleAppenderId;
+					var frameInfo = "";
+					try {
+						var frameEl = window.frameElement;
+						if (frameEl) {
+							frameInfo = "_" + frameEl.tagName + "_" + (frameEl.name || frameEl.id || "");
+						}
+					} catch (e) {
+						frameInfo = "_inaccessibleParentFrame";
+					}
+					var windowName = "PopUp_" + location.host.replace(/[^a-z0-9]/gi, "_") + "_" + consoleAppenderId + frameInfo;
 					if (!useOldPopUp || !useDocumentWrite) {
 						// Ensure a previous window isn't used by using a unique name
 						windowName = windowName + "_" + uniqueId;
@@ -5577,7 +5623,7 @@ var log4javascript = (function() {
 			}
 
 			function fixAttributeValue(attrValue) {
-				return attrValue.toString().replace(/\&/g, "&amp;").replace(/</g, "&lt;").replace(/\"/g, "&quot;");
+				return attrValue.toString().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
 			}
 
 			function getStyleAttributeValue(el) {
@@ -5705,9 +5751,7 @@ var log4javascript = (function() {
 			}
 		}
 
-		var layouts = {};
-
-		function createCommandLineFunctions(appender) {
+		function createCommandLineFunctions() {
 			ConsoleAppender.addGlobalCommandLineFunction("$", function(appender, args, returnValue) {
 				return document.getElementById(args[0]);
 			});
@@ -5793,7 +5837,6 @@ var log4javascript = (function() {
 		function init() {
 			// Add command line functions
 			createCommandLineFunctions();
-			initialized = true;
 		}
 
 		/* ------------------------------------------------------------------ */
